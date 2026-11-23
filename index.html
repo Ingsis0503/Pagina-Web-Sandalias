@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Catálogo Oficial | Tienda de Sandalias</title>
+    <link rel="stylesheet" href="tienda.css">
+</head>
+<body>
+    <!-- BARRA DE NAVEGACIÓN -->
+    <nav class="navbar">
+        <div class="nav-container">
+            <div class="brand" onclick="showSection('catalogo')">
+                <span class="brand-icon">👡</span>
+                <div>
+                    <h1>Sandalias Store</h1>
+                    <small>Envíos a todo Colombia</small>
+                </div>
+            </div>
+
+            <div class="nav-actions">
+                <button class="nav-link active" id="nav-catalogo" onclick="showSection('catalogo')">Catálogo</button>
+                <button class="nav-link" id="nav-mis-pedidos" onclick="showSection('mis-pedidos')" style="display: none;">Mis Pedidos</button>
+                <button class="nav-link nav-admin" id="nav-admin" onclick="showSection('admin')" style="display: none;">Panel Admin</button>
+                
+                <button class="cart-btn" onclick="openCartModal()">
+                    🛒 Carrito (<span id="cart-count">0</span>)
+                </button>
+
+                <div id="auth-area">
+                    <button class="btn-outline" onclick="openAuthModal()">Iniciar Sesión</button>
+                </div>
+            </div>
+        </div>
+    </nav>
+
+    <main class="main-container">
+        <!-- SECCIÓN 1: CATÁLOGO PÚBLICO -->
+        <section id="section-catalogo" class="page-section active">
+            <div class="hero-banner">
+                <div>
+                    <h2>Nueva Colección de Sandalias</h2>
+                    <p>Elige tu modelo, talla y color favorito. Pide en línea con envío a domicilio o nacional.</p>
+                </div>
+                <div class="filters-bar">
+                    <input type="text" id="store-search" placeholder="Buscar modelo o color...">
+                    <select id="store-size-filter">
+                        <option value="">Todas las tallas</option>
+                        <option value="35">Talla 35</option>
+                        <option value="36">Talla 36</option>
+                        <option value="37">Talla 37</option>
+                        <option value="38">Talla 38</option>
+                        <option value="39">Talla 39</option>
+                        <option value="40">Talla 40</option>
+                    </select>
+                </div>
+            </div>
+
+            <div id="catalog-grid" class="catalog-grid"></div>
+        </section>
+
+        <!-- SECCIÓN 2: MIS PEDIDOS (CLIENTE) -->
+        <section id="section-mis-pedidos" class="page-section">
+            <div class="section-header">
+                <h2>Mis Pedidos y Seguimiento de Envío</h2>
+                <button class="btn-secondary" onclick="showSection('catalogo')">← Volver al catálogo</button>
+            </div>
+            <div id="client-orders-list" class="orders-list"></div>
+        </section>
+
+        <!-- SECCIÓN 3: PANEL ADMINISTRADOR -->
+        <section id="section-admin" class="page-section">
+            <div class="section-header">
+                <h2>Panel de Administración</h2>
+                <div class="admin-tabs">
+                    <button class="tab-pill active" id="pill-productos" onclick="switchAdminTab('productos')">Subir y Gestionar Productos</button>
+                    <button class="tab-pill" id="pill-pedidos" onclick="switchAdminTab('pedidos')">Pedidos y Despachos (<span id="admin-orders-badge">0</span>)</button>
+                </div>
+            </div>
+
+            <!-- Sub-vista Admin: Productos -->
+            <div id="admin-tab-productos" class="admin-subview active">
+                <div class="admin-layout">
+                    <div class="card-box">
+                        <h3>Publicar Nueva Sandalia</h3>
+                        <form id="product-form">
+                            <label>Foto del Producto</label>
+                            <input type="file" id="prod-image-file" accept="image/*" required>
+                            <div id="image-preview-box" class="image-preview" style="display: none;">
+                                <img id="image-preview" src="" alt="Vista previa">
+                            </div>
+
+                            <label>Nombre del Modelo</label>
+                            <input type="text" id="prod-name" placeholder="Ej. Sandalia Romana Dorada" required>
+
+                            <div class="grid-2">
+                                <div>
+                                    <label>Color</label>
+                                    <input type="text" id="prod-color" placeholder="Ej. Beige / Dorado" required>
+                                </div>
+                                <div>
+                                    <label>Precio ($ COP)</label>
+                                    <input type="number" id="prod-price" placeholder="Ej. 55000" min="1000" required>
+                                </div>
+                            </div>
+
+                            <div class="grid-2">
+                                <div>
+                                    <label>Tallas disponibles (separadas por coma)</label>
+                                    <input type="text" id="prod-sizes" placeholder="Ej. 35, 36, 37, 38, 39" required>
+                                </div>
+                                <div>
+                                    <label>Stock total (pares)</label>
+                                    <input type="number" id="prod-stock" placeholder="Ej. 15" min="1" required>
+                                </div>
+                            </div>
+
+                            <label>Descripción corta</label>
+                            <textarea id="prod-desc" rows="2" placeholder="Material, altura de suela, comodidad..."></textarea>
+
+                            <button type="submit" class="btn-primary full-width">Publicar en la Tienda</button>
+                        </form>
+                    </div>
+
+                    <div class="card-box">
+                        <h3>Catálogo Publicado</h3>
+                        <div id="admin-products-list" class="admin-prod-list"></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Sub-vista Admin: Pedidos -->
+            <div id="admin-tab-pedidos" class="admin-subview">
+                <div id="admin-orders-list" class="orders-list"></div>
+            </div>
+        </section>
+    </main>
+
+    <!-- MODAL 1: INICIO DE SESIÓN / REGISTRO -->
+    <div id="auth-modal" class="modal-backdrop" style="display: none;">
+        <div class="modal-card">
+            <button class="modal-close" onclick="closeAuthModal()">✕</button>
+            <div class="auth-switch">
+                <button id="tab-login" class="active" onclick="switchAuthMode('login')">Iniciar Sesión</button>
+                <button id="tab-register" onclick="switchAuthMode('register')">Crear Cuenta</button>
+            </div>
+
+            <!-- Formulario Login -->
+            <form id="login-form">
+                <label>Correo Electrónico</label>
+                <input type="email" id="login-email" placeholder="tu@correo.com" required>
+                <label>Contraseña</label>
+                <input type="password" id="login-password" placeholder="••••••••" required>
+                <button type="submit" class="btn-primary full-width">Entrar</button>
+                <p class="demo-hint">Demo Admin: <strong>admin@sandalias.com</strong> / <strong>admin123</strong></p>
+            </form>
+
+            <!-- Formulario Registro -->
+            <form id="register-form" style="display: none;">
+                <label>Nombre Completo</label>
+                <input type="text" id="reg-name" placeholder="Ej. Laura Gómez" required>
+                <div class="grid-2">
+                    <div>
+                        <label>Correo Electrónico</label>
+                        <input type="email" id="reg-email" placeholder="laura@correo.com" required>
+                    </div>
+                    <div>
+                        <label>Teléfono / WhatsApp</label>
+                        <input type="tel" id="reg-phone" placeholder="3001234567" required>
+                    </div>
+                </div>
+                <div class="grid-2">
+                    <div>
+                        <label>Ciudad / Municipio</label>
+                        <input type="text" id="reg-city" placeholder="Ej. Sahagún, Córdoba" required>
+                    </div>
+                    <div>
+                        <label>Contraseña</label>
+                        <input type="password" id="reg-password" placeholder="Mínimo 6 caracteres" minlength="4" required>
+                    </div>
+                </div>
+                <label>Dirección de Envío Predeterminada</label>
+                <input type="text" id="reg-address" placeholder="Barrio, calle, número de casa o referencia" required>
+                <button type="submit" class="btn-primary full-width">Registrarme y Entrar</button>
+            </form>
+        </div>
+    </div>
+
+    <!-- MODAL 2: CARRITO Y PROCESO DE ENVÍO -->
+    <div id="cart-modal" class="modal-backdrop" style="display: none;">
+        <div class="modal-card modal-lg">
+            <button class="modal-close" onclick="closeCartModal()">✕</button>
+            <h3>Tu Carrito y Datos de Envío</h3>
+
+            <div id="cart-modal-items" class="cart-items-box"></div>
+
+            <div class="cart-summary-bar">
+                <span>Total Productos: <strong id="modal-subtotal">$0</strong></span>
+                <span>Envío: <strong id="modal-shipping">$0</strong></span>
+                <span class="grand-total">Total a Pagar: <strong id="modal-total">$0</strong></span>
+            </div>
+
+            <form id="checkout-form" class="checkout-section">
+                <h4>Información de Entrega</h4>
+                <div class="grid-2">
+                    <div>
+                        <label>Nombre quien recibe</label>
+                        <input type="text" id="ship-name" required>
+                    </div>
+                    <div>
+                        <label>Teléfono / WhatsApp</label>
+                        <input type="tel" id="ship-phone" required>
+                    </div>
+                </div>
+
+                <div class="grid-2">
+                    <div>
+                        <label>Tipo de Envío</label>
+                        <select id="ship-type" onchange="renderCartModal()">
+                            <option value="local">Domicilio Local (Sahagún) - $5.000</option>
+                            <option value="nacional">Envío Nacional (Transportadora) - $14.000</option>
+                            <option value="recoger">Recoger en punto / taller - Gratis</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label>Ciudad y Departamento</label>
+                        <input type="text" id="ship-city" placeholder="Ej. Montería, Córdoba" required>
+                    </div>
+                </div>
+
+                <label>Dirección Completa y Referencias</label>
+                <input type="text" id="ship-address" placeholder="Barrio, calle/carrera, número, punto de referencia" required>
+
+                <div class="grid-2">
+                    <div>
+                        <label>Medio de Pago</label>
+                        <select id="ship-payment">
+                            <option value="Nequi">Transferencia Nequi</option>
+                            <option value="Nu">Transferencia Nu</option>
+                            <option value="Bancolombia">Bancolombia</option>
+                            <option value="Contraentrega">Pago Contraentrega (Efectivo)</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label>Nota adicional (opcional)</label>
+                        <input type="text" id="ship-notes" placeholder="Ej. Entregar en la tarde">
+                    </div>
+                </div>
+
+                <button type="submit" class="btn-success full-width">Confirmar Pedido</button>
+            </form>
+        </div>
+    </div>
+
+    <script src="tienda.js"></script>
+</body>
+</html>
