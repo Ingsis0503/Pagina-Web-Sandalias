@@ -1,5 +1,23 @@
 // ==========================================
-// DATOS INICIALES, CONFIGURACIÓN Y MIGRACIÓN
+// 1. CONFIGURACIÓN DE SUPABASE
+// ==========================================
+const SUPABASE_URL = 'https://uxdgbiggelzmukrjljwu.supabase.co';
+const SUPABASE_ANON_KEY = 'sb_publishable_EM38W8bFaPXaccod_abOQw_201MTrTf';
+
+let supabaseClient = null;
+const isSupabaseConfigured =
+    typeof window.supabase !== 'undefined' &&
+    SUPABASE_URL.startsWith('https://') &&
+    SUPABASE_ANON_KEY.length > 10;
+
+if (isSupabaseConfigured) {
+    supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+} else {
+    console.warn('⚠️ No se pudo inicializar el SDK de Supabase.');
+}
+
+// ==========================================
+// 2. DATOS INICIALES Y ESTADO GLOBAL
 // ==========================================
 const DEFAULT_ADMIN = {
     id: 'admin-1',
@@ -27,82 +45,258 @@ const DEFAULT_STORE_CONFIG = {
     emailjsTemplateId: ''
 };
 
-const SAMPLE_IMG_1 = "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='400' height='300'><rect width='100%' height='100%' fill='%23fef3c7'/><text x='50%' y='48%' font-size='21' font-family='sans-serif' fill='%2392400e' text-anchor='middle'>Sandalia Plana Romana</text><text x='50%' y='60%' font-size='13' font-family='sans-serif' fill='%23b45309' text-anchor='middle'>(Unitario y Mayorista 12+)</text></svg>";
-const SAMPLE_IMG_2 = "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='400' height='300'><rect width='100%' height='100%' fill='%23dbeafe'/><text x='50%' y='48%' font-size='21' font-family='sans-serif' fill='%231e40af' text-anchor='middle'>Bolso Bandolera Casual</text><text x='50%' y='60%' font-size='13' font-family='sans-serif' fill='%232563eb' text-anchor='middle'>(Precio Unitario)</text></svg>";
-
 let storeConfig = {
     ...DEFAULT_STORE_CONFIG,
     ...(JSON.parse(localStorage.getItem('store_config')) || {})
 };
 
 let users = JSON.parse(localStorage.getItem('store_users')) || [DEFAULT_ADMIN];
-if (!users.some(u => u.role === 'admin')) {
-    users.unshift(DEFAULT_ADMIN);
-}
-
 let blockedEmails = JSON.parse(localStorage.getItem('store_blocked_emails')) || [];
 let currentUser = JSON.parse(localStorage.getItem('store_currentUser')) || null;
-
-let rawProducts = JSON.parse(localStorage.getItem('store_products')) || [
-    {
-        id: 'prod-1',
-        category: 'Calzado / Sandalias',
-        name: 'Sandalia Romana Dorada',
-        color: 'Dorado / Miel',
-        price: 48000,
-        wholesalePrice: 38000,
-        variantMode: 'sizes',
-        variants: ['35', '36', '37', '38', '39'],
-        description: 'Suela antideslizante liviana, fabricación directa.',
-        image: SAMPLE_IMG_1
-    },
-    {
-        id: 'prod-2',
-        category: 'Bolsos y Accesorios',
-        name: 'Bolso Bandolera Casual',
-        color: 'Azul / Negro',
-        price: 55000,
-        wholesalePrice: 55000,
-        variantMode: 'none',
-        variants: [],
-        description: 'Material resistente con correa ajustable y cierre metálico.',
-        image: SAMPLE_IMG_2
-    }
-];
-
-let products = rawProducts.map(p => {
-    const variants = Array.isArray(p.variants)
-        ? p.variants
-        : (Array.isArray(p.sizes) ? p.sizes : []);
-    const variantMode = p.variantMode || (variants.length > 0 ? 'sizes' : 'none');
-    const unitPrice = Number(p.price) || 0;
-    const wholesalePrice = (typeof p.wholesalePrice === 'number' && p.wholesalePrice > 0)
-        ? p.wholesalePrice
-        : unitPrice;
-
-    return {
-        ...p,
-        category: p.category || 'Calzado / Sandalias',
-        color: p.color || '',
-        price: unitPrice,
-        wholesalePrice,
-        variantMode,
-        variants
-    };
-});
-
+let products = JSON.parse(localStorage.getItem('store_products')) || [];
 let storeOrders = JSON.parse(localStorage.getItem('store_orders')) || [];
 let cart = [];
+
 let uploadedImageBase64 = '';
 let uploadedProofBase64 = '';
 let editingProductId = null;
-
-// Estado temporal para verificación OTP de 4 dígitos
 let pendingRegistration = null;
 let otpResendInterval = null;
 
 // ==========================================
-// CARRITO INDEPENDIENTE POR CUENTA
+// 3. CONEXIÓN Y MAPEO CON SUPABASE
+// ==========================================
+function saveLocalCache() {
+    localStorage.setItem('store_config', JSON.stringify(storeConfig));
+    localStorage.setItem('store_users', JSON.stringify(users));
+    localStorage.setItem('store_blocked_emails', JSON.stringify(blockedEmails));
+    localStorage.setItem('store_currentUser', JSON.stringify(currentUser));
+    localStorage.setItem('store_products', JSON.stringify(products));
+    localStorage.setItem('store_orders', JSON.stringify(storeOrders));
+    localStorage.setItem(getCartStorageKey(), JSON.stringify(cart));
+}
+
+function mapProductFromDb(row) {
+    return {
+        id: row.id,
+        category: row.category || 'General',
+        name: row.name,
+        color: row.color || '',
+        price: Number(row.price) || 0,
+        wholesalePrice: Number(row.wholesale_price) || Number(row.price) || 0,
+        variantMode: row.variant_mode || 'none',
+        variants: Array.isArray(row.variants) ? row.variants : [],
+        description: row.description || '',
+        image: row.image || '',
+        createdAt: Number(row.created_at) || 0
+    };
+}
+
+function mapUserFromDb(row) {
+    return {
+        id: row.id,
+        name: row.name,
+        email: row.email,
+        password: row.password,
+        phone: row.phone || '',
+        city: row.city || '',
+        address: row.address || '',
+        role: row.role || 'client',
+        blocked: Boolean(row.blocked),
+        emailVerified: Boolean(row.email_verified),
+        registeredAt: row.registered_at || '',
+        lastLogin: row.last_login || '',
+        loginCount: Number(row.login_count) || 1
+    };
+}
+
+function mapOrderFromDb(row) {
+    return {
+        orderId: row.order_id,
+        userId: row.user_id,
+        userEmail: row.user_email,
+        createdAt: row.created_at,
+        timestamp: Number(row.timestamp) || 0,
+        status: row.status,
+        items: Array.isArray(row.items) ? row.items : [],
+        subtotal: Number(row.subtotal) || 0,
+        totalSavings: Number(row.total_savings) || 0,
+        depositAmount: Number(row.deposit_amount) || 0,
+        remainingBalance: Number(row.remaining_balance) || 0,
+        paymentVerified: Boolean(row.payment_verified),
+        paymentProof: row.payment_proof || '',
+        shippingCost: row.shipping_cost !== null && row.shipping_cost !== undefined ? Number(row.shipping_cost) : null,
+        total: Number(row.total) || 0,
+        shipping: row.shipping || {}
+    };
+}
+
+async function dbSaveSettings() {
+    saveLocalCache();
+    if (!supabaseClient) return;
+    const { error } = await supabaseClient.from('settings').upsert({
+        id: 'general',
+        name: storeConfig.name,
+        tagline: storeConfig.tagline,
+        whatsapp: storeConfig.whatsapp,
+        payment_info: storeConfig.paymentInfo,
+        emailjs_public_key: storeConfig.emailjsPublicKey,
+        emailjs_service_id: storeConfig.emailjsServiceId,
+        emailjs_template_id: storeConfig.emailjsTemplateId,
+        blocked_emails: blockedEmails
+    });
+    if (error) throw error;
+}
+
+async function dbSaveProduct(p) {
+    saveLocalCache();
+    if (!supabaseClient) return;
+    const { error } = await supabaseClient.from('products').upsert({
+        id: p.id,
+        category: p.category,
+        name: p.name,
+        color: p.color,
+        price: p.price,
+        wholesale_price: p.wholesalePrice,
+        variant_mode: p.variantMode,
+        variants: p.variants,
+        description: p.description,
+        image: p.image,
+        created_at: p.createdAt || Date.now()
+    });
+    if (error) throw error;
+}
+
+async function dbDeleteProduct(productId) {
+    saveLocalCache();
+    if (!supabaseClient) return;
+    const { error } = await supabaseClient.from('products').delete().eq('id', productId);
+    if (error) throw error;
+}
+
+async function dbSaveUser(u) {
+    saveLocalCache();
+    if (!supabaseClient) return;
+    const { error } = await supabaseClient.from('users').upsert({
+        id: u.id,
+        name: u.name,
+        email: u.email,
+        password: u.password,
+        phone: u.phone,
+        city: u.city,
+        address: u.address,
+        role: u.role,
+        blocked: Boolean(u.blocked),
+        email_verified: Boolean(u.emailVerified),
+        registered_at: u.registeredAt,
+        last_login: u.lastLogin,
+        login_count: u.loginCount || 1
+    });
+    if (error) throw error;
+}
+
+async function dbDeleteUser(userId) {
+    saveLocalCache();
+    if (!supabaseClient) return;
+    const { error } = await supabaseClient.from('users').delete().eq('id', userId);
+    if (error) throw error;
+}
+
+async function dbSaveOrder(o) {
+    saveLocalCache();
+    if (!supabaseClient) return;
+    const { error } = await supabaseClient.from('orders').upsert({
+        order_id: o.orderId,
+        user_id: o.userId,
+        user_email: o.userEmail,
+        created_at: o.createdAt,
+        timestamp: o.timestamp || Date.now(),
+        status: o.status,
+        items: o.items,
+        subtotal: o.subtotal,
+        total_savings: o.totalSavings,
+        deposit_amount: o.depositAmount,
+        remaining_balance: o.remainingBalance,
+        payment_verified: Boolean(o.paymentVerified),
+        payment_proof: o.paymentProof,
+        shipping_cost: o.shippingCost,
+        total: o.total,
+        shipping: o.shipping
+    });
+    if (error) throw error;
+}
+
+async function syncAllFromSupabase() {
+    if (!supabaseClient) return;
+
+    try {
+        // 1. Configuración general y bloqueados
+        const { data: settingsData } = await supabaseClient
+            .from('settings')
+            .select('*')
+            .eq('id', 'general')
+            .maybeSingle();
+
+        if (settingsData) {
+            storeConfig = {
+                name: settingsData.name || DEFAULT_STORE_CONFIG.name,
+                tagline: settingsData.tagline || DEFAULT_STORE_CONFIG.tagline,
+                whatsapp: settingsData.whatsapp || '',
+                paymentInfo: settingsData.payment_info || DEFAULT_STORE_CONFIG.paymentInfo,
+                emailjsPublicKey: settingsData.emailjs_public_key || '',
+                emailjsServiceId: settingsData.emailjs_service_id || '',
+                emailjsTemplateId: settingsData.emailjs_template_id || ''
+            };
+            blockedEmails = Array.isArray(settingsData.blocked_emails) ? settingsData.blocked_emails : [];
+        } else {
+            await dbSaveSettings();
+        }
+
+        // 2. Productos públicos
+        const { data: productsData } = await supabaseClient
+            .from('products')
+            .select('*')
+            .order('created_at', { ascending: false });
+
+        if (Array.isArray(productsData)) {
+            products = productsData.map(mapProductFromDb);
+        }
+
+        // 3. Usuarios
+        const { data: usersData } = await supabaseClient.from('users').select('*');
+        if (Array.isArray(usersData) && usersData.length > 0) {
+            users = usersData.map(mapUserFromDb);
+        } else {
+            users = [DEFAULT_ADMIN];
+            await dbSaveUser(DEFAULT_ADMIN);
+        }
+
+        // 4. Pedidos
+        const { data: ordersData } = await supabaseClient
+            .from('orders')
+            .select('*')
+            .order('timestamp', { ascending: false });
+
+        if (Array.isArray(ordersData)) {
+            storeOrders = ordersData.map(mapOrderFromDb);
+        }
+
+        saveLocalCache();
+        applyStoreBranding();
+        updateAuthUI();
+        refreshCategoriesUI();
+        renderCatalog();
+        renderClientOrders();
+        renderAdminProducts();
+        renderAdminOrders();
+        renderAdminClients();
+    } catch (err) {
+        console.error('Error sincronizando con Supabase:', err.message);
+    }
+}
+
+// ==========================================
+// 4. CARRITO INDEPENDIENTE POR CUENTA
 // ==========================================
 function getCartStorageKey() {
     return currentUser ? `store_cart_${currentUser.id}` : 'store_cart_guest';
@@ -132,16 +326,6 @@ function switchUserCart(user) {
     cart = userCart;
 }
 
-function saveStoreData() {
-    localStorage.setItem('store_config', JSON.stringify(storeConfig));
-    localStorage.setItem('store_users', JSON.stringify(users));
-    localStorage.setItem('store_blocked_emails', JSON.stringify(blockedEmails));
-    localStorage.setItem('store_currentUser', JSON.stringify(currentUser));
-    localStorage.setItem('store_products', JSON.stringify(products));
-    localStorage.setItem('store_orders', JSON.stringify(storeOrders));
-    localStorage.setItem(getCartStorageKey(), JSON.stringify(cart));
-}
-
 function isEmailBlocked(email) {
     const clean = (email || '').trim().toLowerCase();
     if (!clean) return false;
@@ -158,6 +342,9 @@ function formatColombianPhone(rawPhone) {
     return digits;
 }
 
+// ==========================================
+// 5. IDENTIDAD DE LA TIENDA Y AJUSTES ADMIN
+// ==========================================
 function applyStoreBranding() {
     document.getElementById('store-brand-name').textContent = storeConfig.name;
     document.getElementById('store-brand-tagline').textContent = storeConfig.tagline;
@@ -201,27 +388,27 @@ function applyStoreBranding() {
     }
 }
 
-const storeConfigForm = document.getElementById('store-config-form');
-if (storeConfigForm) {
-    storeConfigForm.addEventListener('submit', function (e) {
-        e.preventDefault();
+document.getElementById('store-config-form').addEventListener('submit', async function (e) {
+    e.preventDefault();
+    try {
         storeConfig.name = document.getElementById('cfg-store-name').value.trim() || DEFAULT_STORE_CONFIG.name;
         storeConfig.tagline = document.getElementById('cfg-store-tagline').value.trim();
         storeConfig.whatsapp = document.getElementById('cfg-store-whatsapp').value.trim();
-        const cfgPay = document.getElementById('cfg-payment-info');
-        if (cfgPay) storeConfig.paymentInfo = cfgPay.value.trim();
+        storeConfig.paymentInfo = document.getElementById('cfg-payment-info').value.trim();
         storeConfig.emailjsPublicKey = document.getElementById('cfg-emailjs-key').value.trim();
         storeConfig.emailjsServiceId = document.getElementById('cfg-emailjs-service').value.trim();
         storeConfig.emailjsTemplateId = document.getElementById('cfg-emailjs-template').value.trim();
 
-        saveStoreData();
+        await dbSaveSettings();
         applyStoreBranding();
-        alert('Ajustes de la tienda, datos de pago, WhatsApp y correo guardados.');
-    });
-}
+        alert('✅ Ajustes guardados en Supabase para todos los clientes.');
+    } catch (err) {
+        alert('Error al guardar ajustes: ' + err.message);
+    }
+});
 
 // ==========================================
-// NAVEGACIÓN Y AUTENTICACIÓN CON OTP 4 DÍGITOS
+// 6. NAVEGACIÓN, LOGIN Y REGISTRO CON OTP
 // ==========================================
 function showSection(sectionName) {
     document.querySelectorAll('.page-section').forEach(s => s.classList.remove('active'));
@@ -232,8 +419,12 @@ function showSection(sectionName) {
     const navBtn = document.getElementById(`nav-${sectionName}`);
     if (navBtn) navBtn.classList.add('active');
 
-    if (sectionName === 'mis-pedidos') renderClientOrders();
+    if (sectionName === 'mis-pedidos') {
+        syncAllFromSupabase();
+        renderClientOrders();
+    }
     if (sectionName === 'admin') {
+        syncAllFromSupabase();
         renderAdminProducts();
         renderAdminOrders();
         renderAdminClients();
@@ -243,9 +434,11 @@ function showSection(sectionName) {
 function validateActiveSession() {
     if (!currentUser) return;
     const freshUser = users.find(u => u.id === currentUser.id);
-    if (!freshUser || isEmailBlocked(freshUser.email)) {
+    if (!freshUser) return;
+
+    if (isEmailBlocked(freshUser.email)) {
         currentUser = null;
-        saveStoreData();
+        saveLocalCache();
     } else {
         currentUser = freshUser;
     }
@@ -276,8 +469,7 @@ function updateAuthUI() {
 function openAuthModal() {
     backToRegisterForm();
     switchAuthMode('login');
-    const forgotBox = document.getElementById('forgot-password-box');
-    if (forgotBox) forgotBox.style.display = 'none';
+    document.getElementById('forgot-password-box').style.display = 'none';
     document.getElementById('auth-modal').style.display = 'flex';
 }
 
@@ -297,7 +489,6 @@ function switchAuthMode(mode) {
 
 function toggleForgotPasswordBox() {
     const box = document.getElementById('forgot-password-box');
-    if (!box) return;
     const isHidden = box.style.display === 'none';
     box.style.display = isHidden ? 'block' : 'none';
     if (isHidden) {
@@ -309,15 +500,14 @@ function toggleForgotPasswordBox() {
 }
 
 function sendForgotPasswordWhatsApp() {
-    const forgotInput = document.getElementById('forgot-email-input');
     const email = (
-        (forgotInput ? forgotInput.value.trim() : '') ||
+        document.getElementById('forgot-email-input').value.trim() ||
         document.getElementById('login-email').value.trim()
     ).toLowerCase();
 
     if (!email) {
         alert('Escribe tu correo electrónico para enviarlo al administrador.');
-        if (forgotInput) forgotInput.focus();
+        document.getElementById('forgot-email-input').focus();
         return;
     }
 
@@ -331,39 +521,54 @@ function sendForgotPasswordWhatsApp() {
     window.open(`https://wa.me/${adminPhone}?text=${encodeURIComponent(msg)}`, '_blank');
 }
 
-const loginForm = document.getElementById('login-form');
-if (loginForm) {
-    loginForm.addEventListener('submit', function (e) {
-        e.preventDefault();
-        const email = document.getElementById('login-email').value.trim().toLowerCase();
-        const password = document.getElementById('login-password').value;
+document.getElementById('login-form').addEventListener('submit', async function (e) {
+    e.preventDefault();
+    const email = document.getElementById('login-email').value.trim().toLowerCase();
+    const password = document.getElementById('login-password').value;
 
-        if (isEmailBlocked(email)) {
-            alert('🚫 Este correo o cuenta ha sido bloqueado por el administrador.');
-            return;
+    if (isEmailBlocked(email)) {
+        alert('🚫 Este correo o cuenta ha sido bloqueado por el administrador.');
+        return;
+    }
+
+    let user = users.find(u => u.email.toLowerCase() === email && u.password === password);
+
+    if (!user && supabaseClient) {
+        const { data } = await supabaseClient
+            .from('users')
+            .select('*')
+            .ilike('email', email)
+            .maybeSingle();
+        if (data && data.password === password) {
+            user = mapUserFromDb(data);
+            users.push(user);
         }
+    }
 
-        const user = users.find(u => u.email.toLowerCase() === email && u.password === password);
-        if (!user) {
-            alert('Correo o contraseña incorrectos.');
-            return;
-        }
+    if (!user) {
+        alert('Correo o contraseña incorrectos.');
+        return;
+    }
 
-        user.lastLogin = new Date().toLocaleString('es-CO');
-        user.loginCount = (user.loginCount || 0) + 1;
+    if (user.blocked || isEmailBlocked(user.email)) {
+        alert('🚫 Esta cuenta está bloqueada por el administrador.');
+        return;
+    }
 
-        switchUserCart(user);
-        saveStoreData();
-        updateAuthUI();
-        updateCartBadge();
-        closeAuthModal();
-        this.reset();
+    user.lastLogin = new Date().toLocaleString('es-CO');
+    user.loginCount = (user.loginCount || 0) + 1;
 
-        if (user.role === 'admin') {
-            showSection('admin');
-        }
-    });
-}
+    switchUserCart(user);
+    await dbSaveUser(user);
+    updateAuthUI();
+    updateCartBadge();
+    closeAuthModal();
+    this.reset();
+
+    if (user.role === 'admin') {
+        showSection('admin');
+    }
+});
 
 async function dispatchOtpEmail(email, name, code) {
     const noticeEl = document.getElementById('otp-status-notice');
@@ -402,9 +607,7 @@ async function dispatchOtpEmail(email, name, code) {
             })
         });
 
-        if (!response.ok) {
-            throw new Error('Error en el servicio de correo');
-        }
+        if (!response.ok) throw new Error('Error en el servicio de correo');
 
         noticeEl.className = 'otp-notice info';
         noticeEl.textContent = '✅ Código enviado. Revisa tu bandeja de entrada o carpeta de Spam.';
@@ -438,62 +641,57 @@ function startResendCooldown(seconds = 60) {
 
 function clearOtpBoxes() {
     for (let i = 1; i <= 4; i++) {
-        const box = document.getElementById(`otp-${i}`);
-        if (box) box.value = '';
+        document.getElementById(`otp-${i}`).value = '';
     }
-    const firstBox = document.getElementById('otp-1');
-    if (firstBox) firstBox.focus();
+    document.getElementById('otp-1').focus();
 }
 
-const registerForm = document.getElementById('register-form');
-if (registerForm) {
-    registerForm.addEventListener('submit', async function (e) {
-        e.preventDefault();
-        const email = document.getElementById('reg-email').value.trim().toLowerCase();
-        const name = document.getElementById('reg-name').value.trim();
+document.getElementById('register-form').addEventListener('submit', async function (e) {
+    e.preventDefault();
+    const email = document.getElementById('reg-email').value.trim().toLowerCase();
+    const name = document.getElementById('reg-name').value.trim();
 
-        if (isEmailBlocked(email)) {
-            alert('🚫 Este correo electrónico está bloqueado y no puede registrarse en la tienda.');
-            return;
-        }
+    if (isEmailBlocked(email)) {
+        alert('🚫 Este correo electrónico está bloqueado y no puede registrarse en la tienda.');
+        return;
+    }
 
-        if (users.some(u => u.email.toLowerCase() === email)) {
-            alert('Este correo ya está registrado. Inicia sesión.');
-            return;
-        }
+    if (users.some(u => u.email.toLowerCase() === email)) {
+        alert('Este correo ya está registrado. Inicia sesión.');
+        return;
+    }
 
-        const generatedCode = Math.floor(1000 + Math.random() * 9000).toString();
-        pendingRegistration = {
-            userData: {
-                name,
-                email,
-                phone: document.getElementById('reg-phone').value.trim(),
-                city: document.getElementById('reg-city').value.trim(),
-                address: document.getElementById('reg-address').value.trim(),
-                password: document.getElementById('reg-password').value
-            },
-            code: generatedCode,
-            expiresAt: Date.now() + 10 * 60 * 1000,
-            attempts: 0
-        };
+    const generatedCode = Math.floor(1000 + Math.random() * 9000).toString();
+    pendingRegistration = {
+        userData: {
+            name,
+            email,
+            phone: document.getElementById('reg-phone').value.trim(),
+            city: document.getElementById('reg-city').value.trim(),
+            address: document.getElementById('reg-address').value.trim(),
+            password: document.getElementById('reg-password').value
+        },
+        code: generatedCode,
+        expiresAt: Date.now() + 10 * 60 * 1000,
+        attempts: 0
+    };
 
-        const sendBtn = document.getElementById('btn-send-otp');
-        sendBtn.disabled = true;
-        sendBtn.textContent = 'Generando código...';
+    const sendBtn = document.getElementById('btn-send-otp');
+    sendBtn.disabled = true;
+    sendBtn.textContent = 'Generando código...';
 
-        document.getElementById('auth-mode-tabs').style.display = 'none';
-        document.getElementById('register-form').style.display = 'none';
-        document.getElementById('verify-email-step').style.display = 'block';
-        document.getElementById('otp-target-email').textContent = email;
+    document.getElementById('auth-mode-tabs').style.display = 'none';
+    document.getElementById('register-form').style.display = 'none';
+    document.getElementById('verify-email-step').style.display = 'block';
+    document.getElementById('otp-target-email').textContent = email;
 
-        await dispatchOtpEmail(email, name, generatedCode);
-        sendBtn.disabled = false;
-        sendBtn.textContent = 'Enviar Código de Verificación';
+    await dispatchOtpEmail(email, name, generatedCode);
+    sendBtn.disabled = false;
+    sendBtn.textContent = 'Enviar Código de Verificación';
 
-        clearOtpBoxes();
-        startResendCooldown(60);
-    });
-}
+    clearOtpBoxes();
+    startResendCooldown(60);
+});
 
 async function resendOtpCode() {
     if (!pendingRegistration) return;
@@ -520,93 +718,75 @@ function backToRegisterForm() {
 
 for (let i = 1; i <= 4; i++) {
     const box = document.getElementById(`otp-${i}`);
-    if (!box) continue;
-
     box.addEventListener('input', function () {
         this.value = this.value.replace(/\D/g, '').slice(0, 1);
-        if (this.value && i < 4) {
-            document.getElementById(`otp-${i + 1}`).focus();
-        }
+        if (this.value && i < 4) document.getElementById(`otp-${i + 1}`).focus();
     });
-
     box.addEventListener('keydown', function (e) {
-        if (e.key === 'Backspace' && !this.value && i > 1) {
-            document.getElementById(`otp-${i - 1}`).focus();
-        }
+        if (e.key === 'Backspace' && !this.value && i > 1) document.getElementById(`otp-${i - 1}`).focus();
     });
-
     box.addEventListener('paste', function (e) {
         e.preventDefault();
-        const pasted = (e.clipboardData || window.clipboardData)
-            .getData('text')
-            .replace(/\D/g, '')
-            .slice(0, 4);
+        const pasted = (e.clipboardData || window.clipboardData).getData('text').replace(/\D/g, '').slice(0, 4);
         pasted.split('').forEach((digit, idx) => {
             const target = document.getElementById(`otp-${idx + 1}`);
             if (target) target.value = digit;
         });
-        const focusIdx = Math.min(4, Math.max(1, pasted.length));
-        document.getElementById(`otp-${focusIdx}`).focus();
+        document.getElementById(`otp-${Math.min(4, Math.max(1, pasted.length))}`).focus();
     });
 }
 
-const verifyOtpForm = document.getElementById('verify-otp-form');
-if (verifyOtpForm) {
-    verifyOtpForm.addEventListener('submit', function (e) {
-        e.preventDefault();
-        if (!pendingRegistration) return;
+document.getElementById('verify-otp-form').addEventListener('submit', async function (e) {
+    e.preventDefault();
+    if (!pendingRegistration) return;
 
-        const enteredCode = [1, 2, 3, 4]
-            .map(i => document.getElementById(`otp-${i}`).value.trim())
-            .join('');
+    const enteredCode = [1, 2, 3, 4].map(i => document.getElementById(`otp-${i}`).value.trim()).join('');
+    if (enteredCode.length < 4) {
+        alert('Ingresa los 4 dígitos del código.');
+        return;
+    }
+    if (Date.now() > pendingRegistration.expiresAt) {
+        alert('El código ha expirado. Haz clic en "Reenviar código".');
+        return;
+    }
+    if (pendingRegistration.attempts >= 5) {
+        alert('Has superado el límite de intentos. Solicita un nuevo código.');
+        return;
+    }
+    if (enteredCode !== pendingRegistration.code) {
+        pendingRegistration.attempts += 1;
+        alert(`Código incorrecto. Te quedan ${5 - pendingRegistration.attempts} intento(s).`);
+        clearOtpBoxes();
+        return;
+    }
 
-        if (enteredCode.length < 4) {
-            alert('Ingresa los 4 dígitos del código.');
-            return;
-        }
+    const nowStr = new Date().toLocaleString('es-CO');
+    const newUser = {
+        id: 'user-' + Date.now(),
+        ...pendingRegistration.userData,
+        role: 'client',
+        blocked: false,
+        emailVerified: true,
+        registeredAt: nowStr,
+        lastLogin: nowStr,
+        loginCount: 1
+    };
 
-        if (Date.now() > pendingRegistration.expiresAt) {
-            alert('El código ha expirado. Haz clic en "Reenviar código" para recibir uno nuevo.');
-            return;
-        }
-
-        if (pendingRegistration.attempts >= 5) {
-            alert('Has superado el límite de intentos. Solicita un nuevo código.');
-            return;
-        }
-
-        if (enteredCode !== pendingRegistration.code) {
-            pendingRegistration.attempts += 1;
-            const left = 5 - pendingRegistration.attempts;
-            alert(`Código incorrecto. Te quedan ${left} intento(s).`);
-            clearOtpBoxes();
-            return;
-        }
-
-        const nowStr = new Date().toLocaleString('es-CO');
-        const newUser = {
-            id: 'user-' + Date.now(),
-            ...pendingRegistration.userData,
-            role: 'client',
-            blocked: false,
-            emailVerified: true,
-            registeredAt: nowStr,
-            lastLogin: nowStr,
-            loginCount: 1
-        };
-
+    try {
         users.push(newUser);
         switchUserCart(newUser);
         pendingRegistration = null;
-        saveStoreData();
+        await dbSaveUser(newUser);
 
         updateAuthUI();
         updateCartBadge();
         closeAuthModal();
         document.getElementById('register-form').reset();
         alert(`✅ ¡Correo verificado! Bienvenido/a, ${newUser.name}.`);
-    });
-}
+    } catch (err) {
+        alert('Error al registrar la cuenta en la base de datos: ' + err.message);
+    }
+});
 
 function logoutUser() {
     if (currentUser) {
@@ -614,14 +794,14 @@ function logoutUser() {
     }
     currentUser = null;
     loadCartForCurrentUser();
-    saveStoreData();
+    saveLocalCache();
     updateAuthUI();
     updateCartBadge();
     showSection('catalogo');
 }
 
 // ==========================================
-// CONTROLES DEL FORMULARIO DE PRODUCTOS (ADMIN)
+// 7. GESTIÓN DE PRODUCTOS (VISIBLE PARA TODOS)
 // ==========================================
 function toggleCustomCategory() {
     const catSelect = document.getElementById('prod-category').value;
@@ -689,21 +869,18 @@ function compressImage(file, maxWidth = 650, quality = 0.75) {
     });
 }
 
-const prodImgFile = document.getElementById('prod-image-file');
-if (prodImgFile) {
-    prodImgFile.addEventListener('change', async function (e) {
-        const file = e.target.files[0];
-        if (!file) return;
+document.getElementById('prod-image-file').addEventListener('change', async function (e) {
+    const file = e.target.files[0];
+    if (!file) return;
 
-        try {
-            uploadedImageBase64 = await compressImage(file);
-            document.getElementById('image-preview').src = uploadedImageBase64;
-            document.getElementById('image-preview-box').style.display = 'block';
-        } catch (err) {
-            alert('No se pudo procesar la imagen.');
-        }
-    });
-}
+    try {
+        uploadedImageBase64 = await compressImage(file);
+        document.getElementById('image-preview').src = uploadedImageBase64;
+        document.getElementById('image-preview-box').style.display = 'block';
+    } catch (err) {
+        alert('No se pudo procesar la imagen.');
+    }
+});
 
 function editProduct(id) {
     const p = products.find(prod => prod.id === id);
@@ -753,20 +930,20 @@ function resetProductForm() {
     uploadedImageBase64 = '';
 }
 
-const btnCancelProductEdit = document.getElementById('btn-cancel-product-edit');
-if (btnCancelProductEdit) {
-    btnCancelProductEdit.addEventListener('click', resetProductForm);
-}
+document.getElementById('btn-cancel-product-edit').addEventListener('click', resetProductForm);
 
-const productForm = document.getElementById('product-form');
-if (productForm) {
-    productForm.addEventListener('submit', function (e) {
-        e.preventDefault();
-        if (!uploadedImageBase64) {
-            alert('Selecciona una foto del producto.');
-            return;
-        }
+document.getElementById('product-form').addEventListener('submit', async function (e) {
+    e.preventDefault();
+    if (!uploadedImageBase64) {
+        alert('Selecciona una foto del producto.');
+        return;
+    }
 
+    const saveBtn = document.getElementById('btn-save-product');
+    saveBtn.disabled = true;
+    saveBtn.textContent = 'Guardando en Supabase...';
+
+    try {
         const catSelect = document.getElementById('prod-category').value;
         const category = catSelect === 'CUSTOM'
             ? document.getElementById('prod-custom-category').value.trim()
@@ -779,12 +956,11 @@ if (productForm) {
         const variantMode = document.getElementById('prod-variant-mode').value;
         const variantsArray = variantMode === 'none'
             ? []
-            : document.getElementById('prod-variants').value
-                .split(',')
-                .map(s => s.trim())
-                .filter(Boolean);
+            : document.getElementById('prod-variants').value.split(',').map(s => s.trim()).filter(Boolean);
 
-        const productData = {
+        const existingProd = editingProductId ? products.find(p => p.id === editingProductId) : null;
+        const productRecord = {
+            id: editingProductId || ('prod-' + Date.now()),
             category: category || 'General',
             name: document.getElementById('prod-name').value.trim(),
             color: document.getElementById('prod-color').value.trim(),
@@ -793,46 +969,49 @@ if (productForm) {
             variantMode,
             variants: variantsArray,
             description: document.getElementById('prod-desc').value.trim(),
-            image: uploadedImageBase64
+            image: uploadedImageBase64,
+            createdAt: existingProd ? (existingProd.createdAt || Date.now()) : Date.now()
         };
+
+        await dbSaveProduct(productRecord);
 
         if (editingProductId) {
             const idx = products.findIndex(p => p.id === editingProductId);
-            if (idx !== -1) {
-                products[idx] = { ...products[idx], ...productData };
-            }
-            alert('¡Producto actualizado!');
+            if (idx !== -1) products[idx] = productRecord;
         } else {
-            products.unshift({
-                id: 'prod-' + Date.now(),
-                ...productData
-            });
-            alert('¡Producto publicado en el catálogo!');
+            products.unshift(productRecord);
         }
 
-        saveStoreData();
         resetProductForm();
         refreshCategoriesUI();
         renderCatalog();
         renderAdminProducts();
-    });
-}
+        alert('✅ ¡Producto guardado en Supabase y visible para todos los clientes!');
+    } catch (err) {
+        alert('Error al guardar el producto: ' + err.message);
+    } finally {
+        saveBtn.disabled = false;
+        saveBtn.textContent = 'Publicar en el Catálogo';
+    }
+});
 
-function deleteProduct(id) {
-    if (confirm('¿Eliminar este producto del catálogo?')) {
+async function deleteProduct(id) {
+    if (!confirm('¿Eliminar este producto del catálogo para todos los clientes?')) return;
+    try {
+        await dbDeleteProduct(id);
         products = products.filter(p => p.id !== id);
-        saveStoreData();
         refreshCategoriesUI();
         renderCatalog();
         renderAdminProducts();
+    } catch (err) {
+        alert('Error al eliminar producto: ' + err.message);
     }
 }
 
 function renderAdminProducts() {
     const container = document.getElementById('admin-products-list');
-    if (!container) return;
     if (products.length === 0) {
-        container.innerHTML = '<p style="color:#64748b;">No hay productos publicados.</p>';
+        container.innerHTML = '<p style="color:#64748b;">Aún no has publicado productos en la base de datos.</p>';
         return;
     }
 
@@ -864,7 +1043,7 @@ function renderAdminProducts() {
 }
 
 // ==========================================
-// REGLA DE MAYORISTA POR DOCENA (SOLO SANDALIAS)
+// 8. REGLA DE MAYORISTA POR DOCENA (SOLO SANDALIAS)
 // ==========================================
 function isSandalItem(itemOrProd) {
     const cat = (itemOrProd.category || '').toLowerCase();
@@ -878,12 +1057,7 @@ function calculateCartBreakdown() {
         const unitPrice = liveProd ? liveProd.price : (item.unitPrice || item.price);
         const wholesalePrice = liveProd ? (liveProd.wholesalePrice || unitPrice) : (item.wholesalePrice || unitPrice);
         const category = liveProd ? liveProd.category : (item.category || '');
-        return {
-            ...item,
-            category,
-            unitPrice,
-            wholesalePrice
-        };
+        return { ...item, category, unitPrice, wholesalePrice };
     });
 
     const totalSandalPairs = enrichedItems.reduce((sum, item) => {
@@ -904,35 +1078,20 @@ function calculateCartBreakdown() {
         subtotal += lineTotal;
         totalSavings += lineSavings;
 
-        return {
-            ...item,
-            isSandal,
-            appliedPrice,
-            hasDiscount,
-            lineTotal
-        };
+        return { ...item, isSandal, appliedPrice, hasDiscount, lineTotal };
     });
 
     const minDeposit = Math.ceil(subtotal * 0.5);
-
-    return {
-        items: calculatedItems,
-        totalSandalPairs,
-        qualifiesWholesale,
-        subtotal,
-        minDeposit,
-        totalSavings
-    };
+    return { items: calculatedItems, totalSandalPairs, qualifiesWholesale, subtotal, minDeposit, totalSavings };
 }
 
 // ==========================================
-// FILTROS DINÁMICOS Y CATÁLOGO PÚBLICO
+// 9. CATÁLOGO PÚBLICO Y FILTROS
 // ==========================================
 function refreshCategoriesUI() {
     const categories = [...new Set(products.map(p => p.category).filter(Boolean))];
     const select = document.getElementById('store-category-filter');
     const pillsBox = document.getElementById('category-pills');
-    if (!select || !pillsBox) return;
     const currentSelected = select.value;
 
     select.innerHTML = `<option value="">Todas las categorías (${products.length})</option>` +
@@ -954,7 +1113,6 @@ function selectCategoryFilter(category) {
 
 function renderCatalog() {
     const grid = document.getElementById('catalog-grid');
-    if (!grid) return;
     const search = document.getElementById('store-search').value.toLowerCase();
     const categoryFilter = document.getElementById('store-category-filter').value;
 
@@ -969,7 +1127,7 @@ function renderCatalog() {
     });
 
     if (filtered.length === 0) {
-        grid.innerHTML = '<p style="color:#64748b;">No se encontraron productos con ese criterio.</p>';
+        grid.innerHTML = '<p style="color:#64748b;">Aún no hay productos disponibles en esta categoría.</p>';
         return;
     }
 
@@ -1010,30 +1168,19 @@ function renderCatalog() {
     }).join('');
 }
 
-const storeSearchInput = document.getElementById('store-search');
-if (storeSearchInput) {
-    storeSearchInput.addEventListener('input', renderCatalog);
-}
-
-const storeCategorySelect = document.getElementById('store-category-filter');
-if (storeCategorySelect) {
-    storeCategorySelect.addEventListener('change', function () {
-        refreshCategoriesUI();
-        renderCatalog();
-    });
-}
+document.getElementById('store-search').addEventListener('input', renderCatalog);
+document.getElementById('store-category-filter').addEventListener('change', function () {
+    refreshCategoriesUI();
+    renderCatalog();
+});
 
 // ==========================================
-// CARRITO, ANTICIPO 50% Y COMPROBANTE DE PAGO
+// 10. CARRITO, ANTICIPO 50% Y ENVÍO DE PEDIDO
 // ==========================================
 function formatVariantLabel(item) {
     const parts = [];
-    if (item.variant) {
-        parts.push(item.variantMode === 'sizes' ? `Talla ${item.variant}` : item.variant);
-    }
-    if (item.color) {
-        parts.push(item.color);
-    }
+    if (item.variant) parts.push(item.variantMode === 'sizes' ? `Talla ${item.variant}` : item.variant);
+    if (item.color) parts.push(item.color);
     return parts.length > 0 ? `(${parts.join(' • ')})` : '';
 }
 
@@ -1065,7 +1212,7 @@ function addToCart(productId) {
     }
 
     qtyInput.value = 1;
-    saveStoreData();
+    saveLocalCache();
     updateCartBadge();
 
     const detail = selectedVariant ? ` (${product.variantMode === 'sizes' ? 'Talla ' : ''}${selectedVariant})` : '';
@@ -1074,8 +1221,7 @@ function addToCart(productId) {
 
 function updateCartBadge() {
     const count = cart.reduce((sum, item) => sum + item.quantity, 0);
-    const badge = document.getElementById('cart-count');
-    if (badge) badge.textContent = count;
+    document.getElementById('cart-count').textContent = count;
 }
 
 function openCartModal() {
@@ -1091,15 +1237,11 @@ function openCartModal() {
     document.getElementById('ship-address').value = currentUser.address || '';
 
     const payBox = document.getElementById('checkout-payment-instructions');
-    if (payBox) {
-        payBox.textContent = storeConfig.paymentInfo || 'Comunícate por WhatsApp para solicitar los datos de transferencia.';
-    }
+    payBox.textContent = storeConfig.paymentInfo || 'Comunícate por WhatsApp para solicitar los datos de transferencia.';
 
     uploadedProofBase64 = '';
-    const proofInput = document.getElementById('ship-payment-proof');
-    if (proofInput) proofInput.value = '';
-    const proofPreviewBox = document.getElementById('proof-preview-box');
-    if (proofPreviewBox) proofPreviewBox.style.display = 'none';
+    document.getElementById('ship-payment-proof').value = '';
+    document.getElementById('proof-preview-box').style.display = 'none';
 
     renderCartModal(true);
     document.getElementById('cart-modal').style.display = 'flex';
@@ -1119,35 +1261,30 @@ function copyPaymentDetails() {
     });
 }
 
-const shipPaymentProofInput = document.getElementById('ship-payment-proof');
-if (shipPaymentProofInput) {
-    shipPaymentProofInput.addEventListener('change', async function (e) {
-        const file = e.target.files[0];
-        if (!file) return;
+document.getElementById('ship-payment-proof').addEventListener('change', async function (e) {
+    const file = e.target.files[0];
+    if (!file) return;
 
-        try {
-            uploadedProofBase64 = await compressImage(file, 700, 0.72);
-            document.getElementById('proof-preview-img').src = uploadedProofBase64;
-            document.getElementById('proof-preview-box').style.display = 'flex';
-        } catch (err) {
-            alert('No se pudo cargar la imagen del comprobante. Intenta con otra captura.');
-        }
-    });
-}
+    try {
+        uploadedProofBase64 = await compressImage(file, 650, 0.72);
+        document.getElementById('proof-preview-img').src = uploadedProofBase64;
+        document.getElementById('proof-preview-box').style.display = 'flex';
+    } catch (err) {
+        alert('No se pudo cargar la imagen del comprobante.');
+    }
+});
 
 function changeCartQty(index, delta) {
     cart[index].quantity += delta;
-    if (cart[index].quantity <= 0) {
-        cart.splice(index, 1);
-    }
-    saveStoreData();
+    if (cart[index].quantity <= 0) cart.splice(index, 1);
+    saveLocalCache();
     updateCartBadge();
     renderCartModal(true);
 }
 
 function removeCartItem(index) {
     cart.splice(index, 1);
-    saveStoreData();
+    saveLocalCache();
     updateCartBadge();
     renderCartModal(true);
 }
@@ -1201,10 +1338,9 @@ function renderCartModal(syncDepositField = false) {
 
     const shipType = document.getElementById('ship-type').value;
     const depositInput = document.getElementById('ship-deposit-amount');
-    const minDepositEl = document.getElementById('modal-min-deposit');
 
     document.getElementById('modal-subtotal').textContent = `$${breakdown.subtotal.toLocaleString()}`;
-    if (minDepositEl) minDepositEl.textContent = `$${breakdown.minDeposit.toLocaleString()}`;
+    document.getElementById('modal-min-deposit').textContent = `$${breakdown.minDeposit.toLocaleString()}`;
 
     if (depositInput) {
         depositInput.min = breakdown.minDeposit;
@@ -1222,35 +1358,33 @@ function renderCartModal(syncDepositField = false) {
     }
 }
 
-// ==========================================
-// CONFIRMAR PEDIDO CON VALIDACIÓN DE ANTICIPO 50% Y COMPROBANTE
-// ==========================================
-const checkoutForm = document.getElementById('checkout-form');
-if (checkoutForm) {
-    checkoutForm.addEventListener('submit', function (e) {
-        e.preventDefault();
-        if (cart.length === 0) {
-            alert('Agrega al menos un producto antes de enviar el pedido.');
-            return;
-        }
+document.getElementById('checkout-form').addEventListener('submit', async function (e) {
+    e.preventDefault();
+    if (cart.length === 0) {
+        alert('Agrega al menos un producto antes de enviar el pedido.');
+        return;
+    }
 
-        const breakdown = calculateCartBreakdown();
-        const depositInput = document.getElementById('ship-deposit-amount');
-        const depositPaid = depositInput ? parseFloat(depositInput.value) : breakdown.minDeposit;
+    const breakdown = calculateCartBreakdown();
+    const depositPaid = parseFloat(document.getElementById('ship-deposit-amount').value);
 
-        if (isNaN(depositPaid) || depositPaid < breakdown.minDeposit) {
-            alert(`Para realizar el pedido debes abonar por lo menos el 50% del valor de los productos sin envío ($${breakdown.minDeposit.toLocaleString()}).`);
-            if (depositInput) depositInput.focus();
-            return;
-        }
+    if (isNaN(depositPaid) || depositPaid < breakdown.minDeposit) {
+        alert(`Para realizar el pedido debes abonar por lo menos el 50% del valor de los productos sin envío ($${breakdown.minDeposit.toLocaleString()}).`);
+        document.getElementById('ship-deposit-amount').focus();
+        return;
+    }
 
-        if (!uploadedProofBase64) {
-            alert('Por favor sube la imagen o captura del comprobante de pago.');
-            const proofInput = document.getElementById('ship-payment-proof');
-            if (proofInput) proofInput.focus();
-            return;
-        }
+    if (!uploadedProofBase64) {
+        alert('Por favor sube la imagen o captura del comprobante de pago.');
+        document.getElementById('ship-payment-proof').focus();
+        return;
+    }
 
+    const submitBtn = this.querySelector('button[type="submit"]');
+    submitBtn.disabled = true;
+    submitBtn.textContent = 'Enviando pedido...';
+
+    try {
         const shipName = document.getElementById('ship-name').value.trim();
         const shipPhone = document.getElementById('ship-phone').value.trim();
         const shipTypeVal = document.getElementById('ship-type').value;
@@ -1287,6 +1421,7 @@ if (checkoutForm) {
             userId: currentUser.id,
             userEmail: currentUser.email,
             createdAt: new Date().toLocaleDateString('es-CO'),
+            timestamp: Date.now(),
             status: isPickup ? 'Confirmado' : 'Por cotizar envío',
             items: orderItems,
             subtotal: breakdown.subtotal,
@@ -1308,20 +1443,28 @@ if (checkoutForm) {
             }
         };
 
+        await dbSaveUser(currentUser);
+        await dbSaveOrder(newOrder);
+
         storeOrders.unshift(newOrder);
         cart = [];
         uploadedProofBase64 = '';
-        saveStoreData();
+        saveLocalCache();
 
         updateCartBadge();
         closeCartModal();
         showSection('mis-pedidos');
-        alert(`¡Pedido #${newOrder.orderId} registrado con tu comprobante! Recuerda que la fabricación y entrega tarda entre 8 y 15 días hábiles.`);
-    });
-}
+        alert(`¡Pedido #${newOrder.orderId} enviado! Recuerda que la fabricación y entrega tarda entre 8 y 15 días hábiles.`);
+    } catch (err) {
+        alert('Error al registrar el pedido: ' + err.message);
+    } finally {
+        submitBtn.disabled = false;
+        submitBtn.textContent = 'Confirmar y Enviar Pedido';
+    }
+});
 
 // ==========================================
-// VISOR DE COMPROBANTES DE PAGO
+// 11. VISOR DE COMPROBANTES Y VISTAS DE PEDIDOS
 // ==========================================
 function openProofModal(orderId) {
     const order = storeOrders.find(o => o.orderId === orderId);
@@ -1336,9 +1479,6 @@ function closeProofModal() {
     document.getElementById('proof-viewer-modal').style.display = 'none';
 }
 
-// ==========================================
-// VISTAS DE PEDIDOS (CLIENTE Y ADMIN)
-// ==========================================
 function getStatusBadgeClass(status) {
     if (status === 'Por cotizar envío') return 'st-cotizar';
     if (status === 'Confirmado') return 'st-confirmado';
@@ -1444,15 +1584,15 @@ function switchAdminTab(tab) {
     if (tab === 'pedidos') renderAdminOrders();
 }
 
-function toggleOrderPaymentVerified(orderId) {
+async function toggleOrderPaymentVerified(orderId) {
     const order = storeOrders.find(o => o.orderId === orderId);
     if (!order) return;
     order.paymentVerified = !order.paymentVerified;
-    saveStoreData();
+    await dbSaveOrder(order);
     renderAdminOrders();
 }
 
-function setOrderShipping(orderId) {
+async function setOrderShipping(orderId) {
     const order = storeOrders.find(o => o.orderId === orderId);
     if (!order) return;
 
@@ -1470,16 +1610,16 @@ function setOrderShipping(orderId) {
         order.status = 'Confirmado';
     }
 
-    saveStoreData();
+    await dbSaveOrder(order);
     renderAdminOrders();
     alert(`Envío asignado: $${shippingVal.toLocaleString()}. Total actualizado a $${order.total.toLocaleString()}.`);
 }
 
-function updateOrderStatus(orderId, newStatus) {
+async function updateOrderStatus(orderId, newStatus) {
     const order = storeOrders.find(o => o.orderId === orderId);
     if (!order) return;
     order.status = newStatus;
-    saveStoreData();
+    await dbSaveOrder(order);
     renderAdminOrders();
 }
 
@@ -1516,10 +1656,8 @@ function notifyClientWhatsApp(orderId) {
 }
 
 function renderAdminOrders() {
-    const badge = document.getElementById('admin-orders-badge');
-    if (badge) badge.textContent = storeOrders.length;
+    document.getElementById('admin-orders-badge').textContent = storeOrders.length;
     const container = document.getElementById('admin-orders-list');
-    if (!container) return;
 
     if (storeOrders.length === 0) {
         container.innerHTML = '<p style="color:#64748b;">Aún no hay pedidos de clientes.</p>';
@@ -1606,9 +1744,9 @@ function renderAdminOrders() {
 }
 
 // ==========================================
-// PANEL ADMIN: GESTIÓN DE CUENTAS, ROLES, CONTRASEÑAS Y BLOQUEOS
+// 12. PANEL ADMIN: CUENTAS, ROLES, CONTRASEÑAS Y BLOQUEOS
 // ==========================================
-function toggleUserRole(userId) {
+async function toggleUserRole(userId) {
     const user = users.find(u => u.id === userId);
     if (!user) return;
 
@@ -1629,14 +1767,15 @@ function toggleUserRole(userId) {
         user.role = 'admin';
         user.blocked = false;
         blockedEmails = blockedEmails.filter(e => e !== user.email.toLowerCase());
+        await dbSaveSettings();
         alert(`✅ ${user.name} ahora es Administrador del programa.`);
     }
 
-    saveStoreData();
+    await dbSaveUser(user);
     renderAdminClients();
 }
 
-function toggleBlockUser(userId) {
+async function toggleBlockUser(userId) {
     const user = users.find(u => u.id === userId);
     if (!user) return;
 
@@ -1654,17 +1793,16 @@ function toggleBlockUser(userId) {
         if (!confirm(`¿Bloquear la cuenta y el correo ${user.email}? No podrá iniciar sesión ni volver a registrarse.`)) return;
         user.blocked = true;
         user.role = 'client';
-        if (!blockedEmails.includes(cleanEmail)) {
-            blockedEmails.push(cleanEmail);
-        }
+        if (!blockedEmails.includes(cleanEmail)) blockedEmails.push(cleanEmail);
         alert(`🚫 Correo ${user.email} bloqueado.`);
     }
 
-    saveStoreData();
+    await dbSaveUser(user);
+    await dbSaveSettings();
     renderAdminClients();
 }
 
-function deleteUserAccount(userId) {
+async function deleteUserAccount(userId) {
     const user = users.find(u => u.id === userId);
     if (!user) return;
 
@@ -1678,56 +1816,54 @@ function deleteUserAccount(userId) {
     const alsoBlock = confirm(`¿Deseas también bloquear el correo ${user.email} para que no pueda crear otra cuenta?`);
     if (alsoBlock) {
         const cleanEmail = user.email.toLowerCase();
-        if (!blockedEmails.includes(cleanEmail)) {
-            blockedEmails.push(cleanEmail);
-        }
+        if (!blockedEmails.includes(cleanEmail)) blockedEmails.push(cleanEmail);
+        await dbSaveSettings();
     }
 
     users = users.filter(u => u.id !== userId);
     localStorage.removeItem(`store_cart_${userId}`);
-    saveStoreData();
+    await dbDeleteUser(userId);
     renderAdminClients();
 }
 
-function unblockEmailManual(email) {
+async function unblockEmailManual(email) {
     const clean = (email || '').toLowerCase();
     blockedEmails = blockedEmails.filter(e => e !== clean);
     const user = users.find(u => u.email.toLowerCase() === clean);
-    if (user) user.blocked = false;
+    if (user) {
+        user.blocked = false;
+        await dbSaveUser(user);
+    }
 
-    saveStoreData();
+    await dbSaveSettings();
     renderAdminClients();
 }
 
-const blockEmailForm = document.getElementById('block-email-form');
-if (blockEmailForm) {
-    blockEmailForm.addEventListener('submit', function (e) {
-        e.preventDefault();
-        const input = document.getElementById('manual-block-email');
-        const email = input.value.trim().toLowerCase();
-        if (!email) return;
+document.getElementById('block-email-form').addEventListener('submit', async function (e) {
+    e.preventDefault();
+    const input = document.getElementById('manual-block-email');
+    const email = input.value.trim().toLowerCase();
+    if (!email) return;
 
-        if (currentUser && currentUser.email.toLowerCase() === email) {
-            alert('No puedes bloquear tu propio correo activo.');
-            return;
-        }
+    if (currentUser && currentUser.email.toLowerCase() === email) {
+        alert('No puedes bloquear tu propio correo activo.');
+        return;
+    }
 
-        if (!blockedEmails.includes(email)) {
-            blockedEmails.push(email);
-        }
+    if (!blockedEmails.includes(email)) blockedEmails.push(email);
 
-        const existingUser = users.find(u => u.email.toLowerCase() === email);
-        if (existingUser) {
-            existingUser.blocked = true;
-            existingUser.role = 'client';
-        }
+    const existingUser = users.find(u => u.email.toLowerCase() === email);
+    if (existingUser) {
+        existingUser.blocked = true;
+        existingUser.role = 'client';
+        await dbSaveUser(existingUser);
+    }
 
-        input.value = '';
-        saveStoreData();
-        renderAdminClients();
-        alert(`🚫 Correo ${email} añadido a la lista de bloqueados.`);
-    });
-}
+    input.value = '';
+    await dbSaveSettings();
+    renderAdminClients();
+    alert(`🚫 Correo ${email} añadido a la lista de bloqueados.`);
+});
 
 function togglePasswordVisibility(userId) {
     const span = document.getElementById(`pwd-text-${userId}`);
@@ -1747,36 +1883,33 @@ function togglePasswordVisibility(userId) {
 }
 
 function renderAdminClients() {
-    const usersBadge = document.getElementById('admin-users-badge');
-    if (usersBadge) usersBadge.textContent = users.length;
+    document.getElementById('admin-users-badge').textContent = users.length;
 
     const searchInput = document.getElementById('admin-client-search');
     const query = searchInput ? searchInput.value.toLowerCase().trim() : '';
 
     const statsContainer = document.getElementById('admin-clients-stats');
-    if (statsContainer) {
-        const adminCount = users.filter(u => u.role === 'admin').length;
-        const activeBuyers = users.filter(c => storeOrders.some(o => o.userId === c.id)).length;
+    const adminCount = users.filter(u => u.role === 'admin').length;
+    const activeBuyers = users.filter(c => storeOrders.some(o => o.userId === c.id)).length;
 
-        statsContainer.innerHTML = `
-            <div class="kpi-mini-card">
-                <small>Total Cuentas</small>
-                <p>${users.length}</p>
-            </div>
-            <div class="kpi-mini-card" style="border-left-color:#f59e0b;">
-                <small>Administradores</small>
-                <p>${adminCount}</p>
-            </div>
-            <div class="kpi-mini-card" style="border-left-color:#10b981;">
-                <small>Clientes con Pedidos</small>
-                <p>${activeBuyers}</p>
-            </div>
-            <div class="kpi-mini-card" style="border-left-color:#ef4444;">
-                <small>Correos Bloqueados</small>
-                <p>${blockedEmails.length}</p>
-            </div>
-        `;
-    }
+    statsContainer.innerHTML = `
+        <div class="kpi-mini-card">
+            <small>Total Cuentas</small>
+            <p>${users.length}</p>
+        </div>
+        <div class="kpi-mini-card" style="border-left-color:#f59e0b;">
+            <small>Administradores</small>
+            <p>${adminCount}</p>
+        </div>
+        <div class="kpi-mini-card" style="border-left-color:#10b981;">
+            <small>Clientes con Pedidos</small>
+            <p>${activeBuyers}</p>
+        </div>
+        <div class="kpi-mini-card" style="border-left-color:#ef4444;">
+            <small>Correos Bloqueados</small>
+            <p>${blockedEmails.length}</p>
+        </div>
+    `;
 
     const filteredUsers = users.filter(c => {
         return (
@@ -1789,69 +1922,67 @@ function renderAdminClients() {
     });
 
     const listContainer = document.getElementById('admin-clients-list');
-    if (listContainer) {
-        if (filteredUsers.length === 0) {
-            listContainer.innerHTML = '<p style="color:#64748b;">No se encontraron cuentas que coincidan con la búsqueda.</p>';
-        } else {
-            listContainer.innerHTML = [...filteredUsers].reverse().map(c => {
-                const userOrders = storeOrders.filter(o => o.userId === c.id);
-                const totalSpent = userOrders.reduce((sum, o) => sum + (Number(o.total) || 0), 0);
-                const waPhone = formatColombianPhone(c.phone);
-                const waMsg = `Hola *${c.name}*, te saludamos de *${storeConfig.name}*.`;
-                const isBlocked = Boolean(c.blocked || isEmailBlocked(c.email));
-                const isAdmin = c.role === 'admin';
-                const isSelf = currentUser && currentUser.id === c.id;
+    if (filteredUsers.length === 0) {
+        listContainer.innerHTML = '<p style="color:#64748b;">No se encontraron cuentas que coincidan con la búsqueda.</p>';
+    } else {
+        listContainer.innerHTML = [...filteredUsers].reverse().map(c => {
+            const userOrders = storeOrders.filter(o => o.userId === c.id);
+            const totalSpent = userOrders.reduce((sum, o) => sum + (Number(o.total) || 0), 0);
+            const waPhone = formatColombianPhone(c.phone);
+            const waMsg = `Hola *${c.name}*, te saludamos de *${storeConfig.name}*.`;
+            const isBlocked = Boolean(c.blocked || isEmailBlocked(c.email));
+            const isAdmin = c.role === 'admin';
+            const isSelf = currentUser && currentUser.id === c.id;
 
-                return `
-                    <div class="client-card ${isBlocked ? 'blocked-user-card' : ''}">
-                        <div class="client-info-main">
-                            <h4>
-                                👤 ${c.name}
-                                <small style="color:#64748b; font-weight:500;">(${c.email})</small>
-                                ${isAdmin ? `<span class="role-badge-admin">⭐ Administrador</span>` : ''}
-                                ${c.emailVerified ? `<span class="verified-badge">✓ Verificado</span>` : ''}
-                                ${isBlocked ? `<span class="role-badge-blocked">🚫 Bloqueado</span>` : ''}
-                            </h4>
-                            <div class="client-meta">
-                                📞 <strong>WhatsApp / Tel:</strong> ${c.phone || 'Sin registrar'} &nbsp;|&nbsp;
-                                📍 <strong>Ciudad:</strong> ${c.city || 'Sin registrar'}<br>
-                                🏠 <strong>Dirección guardada:</strong> ${c.address || 'Sin dirección'}<br>
-                                <div class="password-reveal-box">
-                                    🔑 <strong>Contraseña:</strong>
-                                    <span id="pwd-text-${c.id}" data-real-pwd="${(c.password || '').replace(/"/g, '&quot;')}" data-hidden="true">••••••••</span>
-                                    <button type="button" id="pwd-btn-${c.id}" class="link-btn" style="font-size:12px;" onclick="togglePasswordVisibility('${c.id}')">👁️ Ver contraseña</button>
-                                </div>
-                            </div>
-                            <div class="client-badges">
-                                <span class="info-pill blue">Pedidos: ${userOrders.length} ($${totalSpent.toLocaleString()})</span>
-                                <span class="info-pill">Ingresos: ${c.loginCount || 1}</span>
-                                <span class="info-pill">Último acceso: ${c.lastLogin || c.registeredAt || 'Reciente'}</span>
+            return `
+                <div class="client-card ${isBlocked ? 'blocked-user-card' : ''}">
+                    <div class="client-info-main">
+                        <h4>
+                            👤 ${c.name}
+                            <small style="color:#64748b; font-weight:500;">(${c.email})</small>
+                            ${isAdmin ? `<span class="role-badge-admin">⭐ Administrador</span>` : ''}
+                            ${c.emailVerified ? `<span class="verified-badge">✓ Verificado</span>` : ''}
+                            ${isBlocked ? `<span class="role-badge-blocked">🚫 Bloqueado</span>` : ''}
+                        </h4>
+                        <div class="client-meta">
+                            📞 <strong>WhatsApp / Tel:</strong> ${c.phone || 'Sin registrar'} &nbsp;|&nbsp;
+                            📍 <strong>Ciudad:</strong> ${c.city || 'Sin registrar'}<br>
+                            🏠 <strong>Dirección guardada:</strong> ${c.address || 'Sin dirección'}<br>
+                            <div class="password-reveal-box">
+                                🔑 <strong>Contraseña:</strong>
+                                <span id="pwd-text-${c.id}" data-real-pwd="${(c.password || '').replace(/"/g, '&quot;')}" data-hidden="true">••••••••</span>
+                                <button type="button" id="pwd-btn-${c.id}" class="link-btn" style="font-size:12px;" onclick="togglePasswordVisibility('${c.id}')">👁️ Ver contraseña</button>
                             </div>
                         </div>
-                        <div class="client-actions-col">
-                            <div class="client-actions-row">
-                                ${waPhone ? `<a class="btn-whatsapp" href="https://wa.me/${waPhone}?text=${encodeURIComponent(waMsg)}" target="_blank" rel="noopener noreferrer">WhatsApp</a>` : ''}
-                                ${!isSelf ? `
-                                    <button type="button" class="btn-dark-sm" onclick="toggleUserRole('${c.id}')">
-                                        ${isAdmin ? 'Quitar Admin' : 'Hacer Admin'}
-                                    </button>
-                                ` : '<span class="info-pill">Tu sesión actual</span>'}
-                            </div>
-                            ${!isSelf ? `
-                                <div class="client-actions-row">
-                                    <button type="button" class="btn-warning" onclick="toggleBlockUser('${c.id}')">
-                                        ${isBlocked ? 'Desbloquear' : 'Bloquear Correo'}
-                                    </button>
-                                    <button type="button" class="btn-danger" onclick="deleteUserAccount('${c.id}')">
-                                        Eliminar
-                                    </button>
-                                </div>
-                            ` : ''}
+                        <div class="client-badges">
+                            <span class="info-pill blue">Pedidos: ${userOrders.length} ($${totalSpent.toLocaleString()})</span>
+                            <span class="info-pill">Ingresos: ${c.loginCount || 1}</span>
+                            <span class="info-pill">Último acceso: ${c.lastLogin || c.registeredAt || 'Reciente'}</span>
                         </div>
                     </div>
-                `;
-            }).join('');
-        }
+                    <div class="client-actions-col">
+                        <div class="client-actions-row">
+                            ${waPhone ? `<a class="btn-whatsapp" href="https://wa.me/${waPhone}?text=${encodeURIComponent(waMsg)}" target="_blank" rel="noopener noreferrer">WhatsApp</a>` : ''}
+                            ${!isSelf ? `
+                                <button type="button" class="btn-dark-sm" onclick="toggleUserRole('${c.id}')">
+                                    ${isAdmin ? 'Quitar Admin' : 'Hacer Admin'}
+                                </button>
+                            ` : '<span class="info-pill">Tu sesión actual</span>'}
+                        </div>
+                        ${!isSelf ? `
+                            <div class="client-actions-row">
+                                <button type="button" class="btn-warning" onclick="toggleBlockUser('${c.id}')">
+                                    ${isBlocked ? 'Desbloquear' : 'Bloquear Correo'}
+                                </button>
+                                <button type="button" class="btn-danger" onclick="deleteUserAccount('${c.id}')">
+                                    Eliminar
+                                </button>
+                            </div>
+                        ` : ''}
+                    </div>
+                </div>
+            `;
+        }).join('');
     }
 
     const blockedContainer = document.getElementById('admin-blocked-list');
@@ -1874,7 +2005,9 @@ if (clientSearchEl) {
     clientSearchEl.addEventListener('input', renderAdminClients);
 }
 
-// INICIALIZAR TIENDA
+// ==========================================
+// 13. INICIALIZAR TIENDA Y SINCRONIZAR SUPABASE
+// ==========================================
 applyStoreBranding();
 updateAuthUI();
 loadCartForCurrentUser();
@@ -1883,3 +2016,4 @@ refreshCategoriesUI();
 renderCatalog();
 renderAdminOrders();
 renderAdminClients();
+syncAllFromSupabase();
